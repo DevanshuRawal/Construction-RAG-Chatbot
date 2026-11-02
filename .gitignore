@@ -1,0 +1,14 @@
+.env
+.env*
+!.env.example
+__pycache__/
+*.py[cod]
+chroma_db/
+leads*.jsonl
+debug_logs/
+*.debug.jsonl
+.streamlit/secrets.toml
+.venv/
+.venv*/
+.test-deps/
+.test-crypto/
