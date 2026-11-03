@@ -57,9 +57,14 @@ class ConstructionAssistant:
             import cohere
             self.client = cohere.ClientV2(os.environ["COHERE_API_KEY"])
         self.general_client = general_client
+        self.general_client_error = None
         if self.general_client is None and os.getenv("GEMINI_API_KEY"):
-            from google import genai
-            self.general_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+            try:
+                from google import genai
+                self.general_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+            except ImportError as exc:
+                self.general_client_error = str(exc)
+                logger.exception("Gemini SDK is unavailable; general-question fallback is disabled")
         self.clock = clock
         self.request_limit = request_limit
         self.requests = {}

@@ -84,6 +84,8 @@ except Exception as exc:
 
 if not os.getenv("LEADS_ENCRYPTION_KEY"):
     st.sidebar.warning("Lead encryption is not configured. Lead details will not be saved until LEADS_ENCRYPTION_KEY is set.")
+if getattr(assistant, "general_client_error", None):
+    st.sidebar.warning("Gemini general answers are unavailable because the Google GenAI SDK could not be imported. Check the app dependency install logs and redeploy.")
 
 history = st.session_state.history
 with st.container(border=True, key="chat_panel"):

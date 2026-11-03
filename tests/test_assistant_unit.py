@@ -1,3 +1,4 @@
+import builtins
 from types import SimpleNamespace
 
 from src.assistant import ConstructionAssistant, _inr
@@ -139,3 +140,20 @@ def test_general_question_redacts_lead_details_before_sending_to_gemini():
     assert "asha@example.com" not in sent
     assert "Asha Rao" not in sent
     assert "Pune" not in sent
+
+
+def test_missing_gemini_sdk_does_not_break_document_assistant(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "configured-key")
+    original_import = builtins.__import__
+
+    def import_without_google_genai(name, *args, **kwargs):
+        if name == "google":
+            raise ImportError("Gemini SDK is not installed")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_google_genai)
+
+    bot = ConstructionAssistant(EmptyKnowledgeBase())
+
+    assert bot.general_client is None
+    assert bot.general_client_error == "Gemini SDK is not installed"
