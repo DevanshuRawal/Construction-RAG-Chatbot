@@ -16,6 +16,67 @@ def test_chunker_starts_new_chunks_at_headings_and_keeps_table_block():
     assert any(table in chunk for chunk in chunks)
 
 
+def test_chunker_hard_splits_oversized_unbroken_text():
+    chunks = _chunks("x" * 1200, 300, 40)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 300 for chunk in chunks)
+    assert all(set(chunk) == {"x"} for chunk in chunks)
+
+
+def test_chunker_keeps_limit_when_overlap_meets_near_maximum_sentence():
+    text = "# Heading\n" + ("a" * 80) + ". " + ("b" * 98) + "."
+    chunks = _chunks(text, 100, 20)
+
+    assert all(len(chunk) <= 100 for chunk in chunks)
+
+
+def test_chunker_splits_large_markdown_tables_and_repeats_header():
+    newline = chr(10)
+    table = "| Package | Rate |" + newline + "|---|---|" + newline + "".join(
+        f"| Package {index} | rate-{index * 1000} |" + newline for index in range(30)
+    )
+    chunks = _chunks(table, 240, 40)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 240 for chunk in chunks)
+    assert all("| Package | Rate |" in chunk for chunk in chunks)
+    assert all("|---|---|" in chunk for chunk in chunks)
+    combined = "\n".join(chunks)
+    assert all(f"Package {index}" in combined for index in range(30))
+
+
+def test_chunker_rejects_invalid_size_and_overlap():
+    import pytest
+
+    with pytest.raises(ValueError):
+        _chunks("text", 0, 0)
+    with pytest.raises(ValueError):
+        _chunks("text", 100, 100)
+    with pytest.raises(ValueError):
+        HybridKnowledgeBase(chunk_size=0)
+    with pytest.raises(ValueError):
+        HybridKnowledgeBase(chunk_size=100, overlap=100)
+
+
+def test_search_returns_empty_for_blank_query_empty_index_or_nonpositive_k():
+    class EmptyCollection:
+        def count(self):
+            return 0
+
+    class EncoderMustNotRun:
+        def encode(self, *_args, **_kwargs):
+            raise AssertionError("encoder should not run for empty searches")
+
+    kb = object.__new__(HybridKnowledgeBase)
+    kb.collection = EmptyCollection()
+    kb.encoder = EncoderMustNotRun()
+
+    assert kb.search("anything") == []
+    assert kb.search(" ") == []
+    assert kb.search("anything", k=0) == []
+
+
 def test_lexical_terms_include_currency_and_ignore_single_characters():
     assert HybridKnowledgeBase._terms("₹1,950 per sq ft") == {"₹1", "950", "per", "sq", "ft"}
 

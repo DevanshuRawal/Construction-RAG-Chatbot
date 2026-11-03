@@ -36,8 +36,71 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _hard_split(text: str, size: int, overlap: int) -> list[str]:
+    """Split an oversized text span at word boundaries, with a hard fallback."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + size, len(text))
+        if end < len(text):
+            boundary = text.rfind(" ", start + size // 2, end)
+            if boundary > start:
+                end = boundary
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(text):
+            break
+        start = max(start + 1, end - overlap)
+    return chunks
+
+
+def _table_chunks(table: str, size: int) -> list[str]:
+    """Split markdown tables by rows and repeat their header in each chunk."""
+    lines = [line.rstrip() for line in table.splitlines() if line.strip()]
+    if not lines:
+        return []
+    has_header = len(lines) > 1 and re.match(r"^\s*\|?\s*:?-{3,}", lines[1])
+    header = lines[:2] if has_header else lines[:1]
+    rows = lines[len(header):]
+    if len("\n".join(lines)) <= size:
+        return ["\n".join(lines)]
+    if len("\n".join(header)) >= size:
+        # A header larger than the target cannot be repeated without breaking the cap.
+        return _hard_split("\n".join(lines), size, 0)
+
+    result = []
+    current = "\n".join(header)
+    for row in rows:
+        candidate = current + "\n" + row
+        if len(candidate) <= size:
+            current = candidate
+            continue
+        if current != "\n".join(header):
+            result.append(current)
+        current = "\n".join(header)
+        if len(current) + len(row) + 1 <= size:
+            current += "\n" + row
+        else:
+            # A single unusually wide table row cannot be kept atomic.
+            row_size = max(1, size - len(current) - 1)
+            for piece in _hard_split(row, row_size, 0):
+                if len(current) + len(piece) + 1 > size:
+                    result.append(current)
+                    current = "\n".join(header)
+                current += "\n" + piece
+    if current.strip() and current not in result:
+        result.append(current)
+    return result
+
+
 def _chunks(text: str, size: int, overlap: int) -> list[str]:
-    # Split at headings first. Keep markdown/PDF table blocks intact where practical.
+    if size <= 0:
+        raise ValueError("chunk size must be greater than zero")
+    if overlap < 0 or overlap >= size:
+        raise ValueError("chunk overlap must be non-negative and smaller than chunk size")
+
+    # Split at headings first. Keep table rows together where possible.
     sections = re.split(r"(?=^#{1,6} .+$)", text, flags=re.M)
     chunks: list[str] = []
     for section in sections:
@@ -50,20 +113,43 @@ def _chunks(text: str, size: int, overlap: int) -> list[str]:
         paragraphs = re.split(r"\n\s*\n", section)
         current = ""
         for para in paragraphs:
-            # Oversized prose is split by sentence; table blocks remain an atomic unit.
-            pieces = [para] if para.lstrip().startswith("|") else re.split(r"(?<=[.!?])\s+", para)
-            for piece in pieces:
-                if len(current) + len(piece) + 1 > size and current:
+            lines = [line for line in para.splitlines() if line.strip()]
+            is_table = bool(lines) and all(line.lstrip().startswith("|") for line in lines)
+            if is_table:
+                if current.strip():
                     chunks.append(current.strip())
-                    current = current[-overlap:] + " " if overlap else ""
+                    current = ""
+                chunks.extend(_table_chunks(para, size))
+                continue
+
+            for piece in re.split(r"(?<=[.!?])\s+", para):
+                if not piece.strip():
+                    continue
+                if len(piece) > size:
+                    if current.strip():
+                        chunks.append(current.strip())
+                        current = ""
+                    chunks.extend(_hard_split(piece, size, overlap))
+                    continue
+                if len(current) + len(piece) + 1 > size and current:
+                    previous = current.strip()
+                    chunks.append(previous)
+                    current = previous[-overlap:] + " " if overlap else ""
+                    if len(current) + len(piece) + 1 > size:
+                        keep = max(0, size - len(piece) - 1)
+                        current = current[-keep:] if overlap and keep else ""
                 current += piece + "\n"
         if current.strip():
             chunks.append(current.strip())
-    return [c for c in chunks if c]
+    return [chunk for chunk in chunks if chunk]
 
 
 class HybridKnowledgeBase:
     def __init__(self, data_dir: str = "data", db_dir: str = "chroma_db", chunk_size: int = 900, overlap: int = 140, encoder=None):
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than zero")
+        if overlap < 0 or overlap >= chunk_size:
+            raise ValueError("overlap must be non-negative and smaller than chunk_size")
         import chromadb
         self.data_dir = Path(data_dir)
         self.client = chromadb.PersistentClient(path=db_dir)
@@ -130,8 +216,10 @@ class HybridKnowledgeBase:
         return 0.0
 
     def search(self, query: str, k: int = 6) -> list[dict]:
+        if k <= 0 or not query or not query.strip() or self.collection.count() == 0:
+            return []
         query_vec = self.encoder.encode([query], normalize_embeddings=True).tolist()[0]
-        n = min(max(k * 4, 12), max(self.collection.count(), 1))
+        n = min(max(k * 4, 12), self.collection.count())
         result = self.collection.query(query_embeddings=[query_vec], n_results=n, include=["documents", "metadatas", "distances"])
         qterms = self._terms(query)
         candidates = []
