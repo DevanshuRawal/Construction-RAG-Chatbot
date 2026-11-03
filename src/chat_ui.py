@@ -81,20 +81,9 @@ def auto_scroll_script():
         }
 
         const scrollChatPanelToLatest = () => {
-          const messages = chatPanel.querySelectorAll('[data-testid="stChatMessage"]');
-          let scrollContainer = messages.length ? messages[messages.length - 1] : chatPanel;
-          while (scrollContainer && scrollContainer !== chatPanel) {
-            const overflowY = page.defaultView.getComputedStyle(scrollContainer).overflowY;
-            if ((overflowY === 'auto' || overflowY === 'scroll') &&
-                scrollContainer.scrollHeight > scrollContainer.clientHeight) {
-              break;
-            }
-            scrollContainer = scrollContainer.parentElement;
-          }
-          if (!scrollContainer || !chatPanel.contains(scrollContainer)) {
-            scrollContainer = chatPanel;
-          }
-          scrollContainer.scrollTo({ top: scrollContainer.scrollHeight, behavior: 'smooth' });
+          const bottom = chatPanel.scrollHeight;
+          chatPanel.scrollTop = bottom;
+          chatPanel.scrollTo({ top: bottom, behavior: 'smooth' });
         };
         const scheduleScroll = () => page.defaultView.requestAnimationFrame(scrollChatPanelToLatest);
         const observer = new MutationObserver(scheduleScroll);

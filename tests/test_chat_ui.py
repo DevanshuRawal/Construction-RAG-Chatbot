@@ -43,14 +43,14 @@ def test_auto_scroll_is_limited_to_the_chat_panel():
     script = auto_scroll_script()
 
     assert "querySelector('.st-key-chat_panel')" in script
-    assert "querySelectorAll('[data-testid=\"stChatMessage\"]')" in script
-    assert 'scrollContainer.scrollTo' in script
-    assert 'scrollContainer.scrollHeight' in script
+    assert 'chatPanel.scrollTo' in script
+    assert 'chatPanel.scrollHeight' in script
+    assert 'chatPanel.scrollTop = bottom' in script
+    assert 'scrollContainer' not in script
     assert 'requestAnimationFrame' in script
     assert 'MutationObserver' in script
     assert 'ResizeObserver' in script
     assert 'observer.observe(chatPanel' in script
-    assert '!chatPanel.contains(scrollContainer)' in script
     assert 'scrollIntoView' not in script
     assert "behavior: 'smooth'" in script
 
