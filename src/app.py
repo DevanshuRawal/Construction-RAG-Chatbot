@@ -7,6 +7,13 @@ import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 from dotenv import load_dotenv
 
+if __package__:
+    from src.path_setup import ensure_project_root
+else:
+    from path_setup import ensure_project_root
+
+ensure_project_root()
+
 from src.assistant import ConstructionAssistant
 from src.chat_ui import CHATBOT_NAME, THINKING_LABEL, auto_scroll_script, chat_bubble_css, get_visible_suggestions, greeting_for_hour, select_prompt, should_show_suggestions, submit_turn
 from src.diagnostics import log_debug_turn
