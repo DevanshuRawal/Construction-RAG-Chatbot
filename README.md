@@ -1,4 +1,4 @@
-﻿# BuildMate AI — Construction & Interiors Chatbot
+# Construction-RAG-Chatbot\n\n﻿# BuildMate AI — Construction & Interiors Chatbot
 
 A compact RAG chatbot for a fictional Pune-based construction and interiors company. It ingests a mixed-format knowledge base, retrieves and cites evidence, responds in the customer's English, Hindi, or Hinglish, calculates explicitly indicative package estimates, refuses unsupported scope and discount requests, and captures consented project leads in JSONL.
 
