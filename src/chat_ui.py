@@ -66,7 +66,7 @@ def chat_bubble_css():
 
 
 def auto_scroll_script():
-    """Return a browser script that scrolls only the chat panel, never the page."""
+    """Scroll the latest message using the chat panel's own scroll container."""
     return """
     <script>
     try {
@@ -76,19 +76,41 @@ def auto_scroll_script():
         if (window.__buildmateChatScrollObserver) {
           window.__buildmateChatScrollObserver.disconnect();
         }
+        if (window.__buildmateChatResizeObserver) {
+          window.__buildmateChatResizeObserver.disconnect();
+        }
 
         const scrollChatPanelToLatest = () => {
-          chatPanel.scrollTo({ top: chatPanel.scrollHeight, behavior: 'smooth' });
+          const messages = chatPanel.querySelectorAll('[data-testid="stChatMessage"]');
+          let scrollContainer = messages.length ? messages[messages.length - 1] : chatPanel;
+          while (scrollContainer && scrollContainer !== chatPanel) {
+            const overflowY = page.defaultView.getComputedStyle(scrollContainer).overflowY;
+            if ((overflowY === 'auto' || overflowY === 'scroll') &&
+                scrollContainer.scrollHeight > scrollContainer.clientHeight) {
+              break;
+            }
+            scrollContainer = scrollContainer.parentElement;
+          }
+          if (!scrollContainer || !chatPanel.contains(scrollContainer)) {
+            scrollContainer = chatPanel;
+          }
+          scrollContainer.scrollTo({ top: scrollContainer.scrollHeight, behavior: 'smooth' });
         };
-        const observer = new MutationObserver(scrollChatPanelToLatest);
+        const scheduleScroll = () => page.defaultView.requestAnimationFrame(scrollChatPanelToLatest);
+        const observer = new MutationObserver(scheduleScroll);
         observer.observe(chatPanel, { childList: true, subtree: true, characterData: true });
         window.__buildmateChatScrollObserver = observer;
+        const resizeObserver = new ResizeObserver(scheduleScroll);
+        resizeObserver.observe(chatPanel);
+        if (chatPanel.firstElementChild) resizeObserver.observe(chatPanel.firstElementChild);
+        window.__buildmateChatResizeObserver = resizeObserver;
 
-        window.setTimeout(scrollChatPanelToLatest, 120);
+        [0, 100, 300, 700, 1400].forEach(delay => window.setTimeout(scheduleScroll, delay));
         window.setTimeout(() => {
-          scrollChatPanelToLatest();
+          scheduleScroll();
           observer.disconnect();
-        }, 1800);
+          resizeObserver.disconnect();
+        }, 2500);
       }
     } catch (error) {
       // Keep chat usable when browser privacy settings block parent access.
