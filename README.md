@@ -39,6 +39,10 @@ In Streamlit Community Cloud, choose **Create app**, select that repository and 
 
 To add or edit knowledge, place PDF, DOCX, Markdown, or TXT files under `data/`, then run `python -m src.ingest` (incremental) or `python -m src.ingest --rebuild` (clean re-index). Incremental ingestion reconciles the index with the current source set, removing stale chunks from edited and deleted files. The app also checks for new source chunks on startup.
 
+## General question fallback
+
+Company-specific answers remain grounded in the local knowledge base. When no relevant company evidence is found, set `GEMINI_API_KEY` to let Gemini answer general questions. Configure the same key in Streamlit Community Cloud under **Settings → Secrets**; never commit API keys to GitHub. `GEMINI_MODEL` is optional and defaults to `gemini-3.8-flash`. Gemini is instructed not to guess company rates, warranty, availability, or policies. Answers about recent events may need web search grounding for up-to-date verification.
+
 ## Architecture
 
 ```mermaid

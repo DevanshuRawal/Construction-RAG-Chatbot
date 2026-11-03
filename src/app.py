@@ -1,11 +1,15 @@
 """Streamlit chat interface."""
 import os
 import uuid
+import sys
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
-
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 from dotenv import load_dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 if __package__:
     from src.path_setup import ensure_project_root

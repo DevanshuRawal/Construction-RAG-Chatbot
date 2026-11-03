@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from src.assistant import ConstructionAssistant, _inr
 
 
@@ -85,3 +87,55 @@ def test_discount_injection_is_refused_without_retrieval(monkeypatch):
     ):
         answer, _ = bot.respond(prompt, [], {})
         assert "can't issue or promise discounts" in answer
+
+
+class EmptyKnowledgeBase:
+    def search(self, query):
+        return []
+
+
+class FakeGeminiClient:
+    def __init__(self, answer="The general answer is 42."):
+        self.answer = answer
+        self.calls = []
+        self.models = self
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(text=self.answer)
+
+
+def test_unrelated_question_uses_gemini_when_company_documents_have_no_answer():
+    client = FakeGeminiClient()
+    bot = ConstructionAssistant(EmptyKnowledgeBase(), general_client=client)
+
+    answer, _ = bot.respond("Explain why the sky looks blue.", [], {})
+
+    assert answer == "The general answer is 42."
+    assert len(client.calls) == 1
+    assert "Explain why the sky looks blue." in client.calls[0]["contents"]
+    assert client.calls[0]["model"] == "gemini-3.8-flash"
+    assert "general-purpose assistant" in client.calls[0]["config"]["system_instruction"]
+
+
+def test_out_of_scope_question_is_sent_to_gemini_when_configured():
+    client = FakeGeminiClient("Chess is a strategy board game.")
+    bot = ConstructionAssistant(EmptyKnowledgeBase(), general_client=client)
+
+    answer, _ = bot.respond("Write me a poem about chess.", [], {})
+
+    assert answer == "Chess is a strategy board game."
+    assert len(client.calls) == 1
+
+
+def test_general_question_redacts_lead_details_before_sending_to_gemini():
+    client = FakeGeminiClient()
+    bot = ConstructionAssistant(EmptyKnowledgeBase(), general_client=client)
+    lead = {"name": "Asha Rao", "phone_or_email": "asha@example.com", "city": "Pune"}
+
+    bot.respond("What is a good way to plan a kitchen?", [], lead)
+
+    sent = client.calls[0]["contents"]
+    assert "asha@example.com" not in sent
+    assert "Asha Rao" not in sent
+    assert "Pune" not in sent
