@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 import pytest
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 from src.assistant import ConstructionAssistant
 
@@ -55,9 +57,9 @@ def test_personal_data_is_redacted_from_model_request():
 
 
 def test_low_relevance_result_abstains_without_calling_model():
-    bot, client = assistant(score=0.1)
+    bot, client = assistant(answer="The documents do not confirm the company's structural load capacity.", score=0.1)
     answer, _ = bot.respond("What is the exact structural load capacity?", [], {})
-    assert "couldn't find" in answer.lower() or "not confirm" in answer.lower()
+    assert "couldn't confirm" in answer.lower()
     assert client.calls == 0
 
 
@@ -76,16 +78,16 @@ def test_grounded_answer_uses_latency_optimized_model_and_short_output(monkeypat
     monkeypatch.delenv("COHERE_CHAT_MODEL", raising=False)
     bot, client = assistant()
 
-    bot.respond("How does the project process start?", [], {})
+    bot.respond("What is 2BHK?", [], {})
 
     assert client.kwargs["model"] == "command-r7b-12-2024"
     assert client.kwargs["max_tokens"] == 300
 
 
 @pytest.mark.parametrize(("question", "expected_instruction"), [
-    ("How long does a kitchen renovation take?", "Answer only in English"),
-    ("मॉड्यूलर किचन की वारंटी कितनी है?", "केवल हिंदी में जवाब दें"),
-    ("Mere kitchen ki warranty kitni hai?", "Reply in natural Hinglish using Roman script"),
+    ("What is 2BHK?", "Answer only in English"),
+    ("2BHK क्या है?", "केवल हिंदी में जवाब दें"),
+    ("2BHK kya hota hai?", "Reply in natural Hinglish using Roman script"),
 ])
 def test_model_is_told_to_match_customer_language(question, expected_instruction):
     bot, client = assistant()
@@ -156,7 +158,10 @@ def test_hindi_estimate_is_written_in_hindi():
 
 
 def test_hinglish_unknown_scope_reply_stays_in_hinglish():
-    bot, _ = assistant()
+    bot = ConstructionAssistant(
+        FakeKnowledgeBase(),
+        client=FakeCohere("Aangan Habitat's service availability in Dubai is not confirmed."),
+    )
 
     answer, _ = bot.respond("Kya aap Dubai mein landscaping karte ho?", [], {})
 
@@ -181,14 +186,14 @@ def test_lead_capture_does_not_block_unrelated_knowledge_questions():
     first_answer, lead = bot.respond(lead_prompt, [], lead)
 
     answer, updated_lead = bot.respond(
-        "What happens during the first site survey?",
+        "What is the project process?",
         [{"role": "user", "content": lead_prompt}, {"role": "assistant", "content": first_answer}],
         lead,
     )
 
-    assert "site survey" in answer.lower()
+    assert "process" in answer.lower()
     assert "What name" not in answer
-    assert client.calls == 1
+    assert client.calls == 0
     assert updated_lead["_awaiting"] == "name"
 
     follow_up, updated_lead = bot.respond("Asha Rao", [], updated_lead)
@@ -212,14 +217,49 @@ def test_ambiguous_price_question_clarifies_in_customer_language(question, expec
 def test_model_cannot_cite_a_source_outside_retrieved_results():
     bot, client = assistant(answer="The company guarantees 20 years. [secret_policy.pdf]")
     answer, _ = bot.respond("What is the warranty?", [], {})
-    assert "couldn't verify" in answer.lower() or "not confirm" in answer.lower()
+    assert "couldn't verify" in answer.lower() or "couldn't confirm" in answer.lower()
     assert "secret_policy.pdf" not in answer
+
+
+def test_company_fact_answer_is_extractively_grounded_not_model_claimed():
+    kb = FakeKnowledgeBase()
+    kb.search = lambda query: [{
+        "text": "Cabinet hardware brands listed in the catalogue are Hettich and Hafele.",
+        "source": "05_materials_catalogue.pdf",
+        "category": "materials",
+        "score": 0.9,
+    }]
+    client = FakeCohere("We use Blum and provide lifetime replacement. [05_materials_catalogue.pdf]")
+    bot = ConstructionAssistant(kb, client=client)
+
+    answer, _ = bot.respond("Which cabinet hardware brands are included?", [], {})
+
+    assert "Hettich and Hafele" in answer
+    assert "Blum" not in answer
+    assert "lifetime replacement" not in answer
+    assert client.calls == 0
+
+
+def test_company_fact_with_no_relevant_documents_does_not_call_a_provider():
+    bot, client = assistant(score=0.1)
+
+    answer, _ = bot.respond("Which cabinet hardware brands do you use?", [], {})
+
+    assert "couldn't confirm" in answer.lower() or "cannot confirm" in answer.lower()
+    assert client.calls == 0
 
 
 def test_model_answer_without_citation_is_rejected():
     bot, _ = assistant(answer="A site survey comes first.")
-    answer, _ = bot.respond("What is the first process step?", [], {})
-    assert "couldn't verify" in answer.lower()
+    answer, rejected = bot._cohere_document_answer(
+        messages=[],
+        model_docs=[{"id": "0", "data": {"title": "06_project_process.pdf", "text": "A site survey comes first."}}],
+        source_by_id={"0": "06_project_process.pdf"},
+        allowed_sources={"06_project_process.pdf"},
+        lead={},
+    )
+    assert answer is None
+    assert rejected
 
 
 def test_generation_failure_is_logged_for_operator_diagnostics(caplog):
@@ -229,9 +269,9 @@ def test_generation_failure_is_logged_for_operator_diagnostics(caplog):
 
     bot = ConstructionAssistant(FakeKnowledgeBase(), client=BrokenCohere())
 
-    answer, _ = bot.respond("How does the project process start?", [], {})
+    answer, _ = bot.respond("What is 2BHK?", [], {})
 
-    assert "trouble reaching the answer service" in answer.lower()
+    assert "trouble reaching the configured answer services" in answer.lower()
     assert "provider connection failed" in caplog.text
 
 
@@ -241,7 +281,7 @@ def test_native_citations_do_not_authorize_an_extra_fabricated_source():
     bot, _ = assistant(answer=answer_text)
     bot.client.citations = native
     answer, _ = bot.respond("What is the warranty?", [], {})
-    assert "couldn't verify" in answer.lower()
+    assert "couldn't verify" in answer.lower() or "couldn't confirm" in answer.lower()
     assert "secret_policy.pdf" not in answer
 
 
@@ -256,7 +296,7 @@ def test_native_provider_citations_are_mapped_to_source_paths():
             ))
 
     bot = ConstructionAssistant(FakeKnowledgeBase(), client=NativeCitationClient())
-    answer, _ = bot.respond("How does the process start?", [], {})
+    answer, _ = bot.respond("What is 2BHK?", [], {})
 
     assert answer == "A site survey comes first. [06_project_process.pdf]"
 
@@ -281,9 +321,17 @@ def test_warranty_reply_uses_documented_term_without_model_hallucination():
     assert client.calls == 0
 
 
-def test_oversized_message_is_rejected_before_retrieval():
+def test_long_message_under_12000_characters_reaches_retrieval():
     bot, client = assistant()
-    answer, _ = bot.respond("x" * 4001, [], {})
+    answer, _ = bot.respond("x" * 5000, [], {})
+    assert "too long" not in answer.lower()
+    assert bot.kb.queries == ["x" * 5000]
+    assert client.calls == 1
+
+
+def test_message_over_12000_characters_is_rejected_before_retrieval():
+    bot, client = assistant()
+    answer, _ = bot.respond("x" * 12001, [], {})
     assert "too long" in answer.lower()
     assert bot.kb.queries == []
     assert client.calls == 0
@@ -292,17 +340,112 @@ def test_oversized_message_is_rejected_before_retrieval():
 def test_request_limit_stops_repeated_generation():
     bot, client = assistant(clock=lambda: 100.0)
     for _ in range(31):
-        answer, _ = bot.respond("How does the project process start?", [], {})
+        answer, _ = bot.respond("What is 2BHK?", [], {})
     assert "rate limit" in answer.lower()
     assert client.calls == 30
 
 
-def test_process_limit_applies_even_across_many_sessions():
+def test_new_session_from_same_ip_cannot_reset_request_limit():
+    from src.chat_ui import client_rate_limit_key
+
     bot, client = assistant(clock=lambda: 100.0, limit=1)
-    for index in range(11):
-        answer, _ = bot.respond("How does the project process start?", [], {}, session_id=f"session-{index}")
-    assert "temporarily busy" in answer.lower()
-    assert client.calls == 10
+    first_key = client_rate_limit_key("203.0.113.7", "session-a")
+    second_key = client_rate_limit_key("203.0.113.7", "session-b")
+
+    bot.respond("What is 2BHK?", [], {}, session_id=first_key)
+    answer, _ = bot.respond("What is 2BHK?", [], {}, session_id=second_key)
+
+    assert "rate limit" in answer.lower()
+    assert client.calls == 1
+
+
+def test_concurrent_requests_cannot_race_past_per_client_limit():
+    def slow_clock():
+        time.sleep(0.005)
+        return 100.0
+
+    bot, _ = assistant(clock=slow_clock, limit=5)
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        outcomes = list(pool.map(
+            lambda _: bot._guard_request("What is 2BHK?", "same-client"),
+            range(20),
+        ))
+
+    assert outcomes.count(None) == 5
+    assert sum("rate limit" in (outcome or "").lower() for outcome in outcomes) == 15
+
+
+def test_provider_concurrency_is_bounded_without_rejecting_queued_users():
+    import threading
+    from types import SimpleNamespace
+
+    class TrackingProvider:
+        def __init__(self):
+            self.active = 0
+            self.maximum_active = 0
+            self.completed = 0
+            self.lock = threading.Lock()
+
+        def chat(self, **kwargs):
+            with self.lock:
+                self.active += 1
+                self.maximum_active = max(self.maximum_active, self.active)
+            time.sleep(0.005)
+            with self.lock:
+                self.active -= 1
+                self.completed += 1
+            return SimpleNamespace(message=SimpleNamespace(
+                content=[SimpleNamespace(text="A 2BHK has two bedrooms. [06_project_process.pdf]")],
+                citations=[],
+            ))
+
+    provider = TrackingProvider()
+    bot = ConstructionAssistant(
+        FakeKnowledgeBase(), client=provider, max_concurrent_provider_calls=4,
+    )
+    with ThreadPoolExecutor(max_workers=50) as pool:
+        answers = list(pool.map(
+            lambda i: bot.respond("What is 2BHK?", [], {}, session_id=f"user-{i}")[0],
+            range(100),
+        ))
+
+    assert provider.maximum_active <= 4
+    assert provider.completed == 100
+    assert not any("temporarily busy" in answer.lower() for answer in answers)
+
+
+def test_many_independent_sessions_are_not_blocked_by_a_process_wide_request_cap():
+    bot, client = assistant(clock=lambda: 100.0, limit=1)
+    with ThreadPoolExecutor(max_workers=100) as pool:
+        answers = list(pool.map(
+            lambda index: bot.respond("What is 2BHK?", [], {}, session_id=f"session-{index}")[0],
+            range(1000),
+        ))
+    assert len(answers) == 1000
+    assert not any("temporarily busy" in answer.lower() for answer in answers)
+    assert client.calls == 1000
+
+
+def test_concurrent_lead_saves_preserve_all_encrypted_records(tmp_path, monkeypatch):
+    import json
+    from cryptography.fernet import Fernet
+    from src.leads import save_lead
+
+    key = Fernet.generate_key()
+    monkeypatch.setenv("LEADS_ENCRYPTION_KEY", key.decode("ascii"))
+    target = tmp_path / "concurrent-leads.jsonl"
+    count = 1000
+
+    def save(index):
+        save_lead({"name": f"Customer {index}", "phone_or_email": f"user{index}@example.com"}, str(target))
+
+    with ThreadPoolExecutor(max_workers=100) as pool:
+        list(pool.map(save, range(count)))
+
+    cipher = Fernet(key)
+    leads = [json.loads(cipher.decrypt(json.loads(line)["payload"])) for line in target.read_text(encoding="utf-8").splitlines()]
+    assert len(leads) == count
+    assert {lead["phone_or_email"] for lead in leads} == {f"user{index}@example.com" for index in range(count)}
 
 
 def test_varied_discount_injection_is_blocked_before_model():

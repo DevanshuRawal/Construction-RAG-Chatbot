@@ -2,6 +2,7 @@
 import os
 import uuid
 import sys
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import streamlit as st
@@ -19,12 +20,14 @@ else:
 ensure_project_root()
 
 from src.assistant import ConstructionAssistant
-from src.chat_ui import CHATBOT_NAME, THINKING_LABEL, auto_scroll_script, chat_bubble_css, get_visible_suggestions, greeting_for_hour, select_prompt, should_show_suggestions, submit_turn
+from src.chat_ui import CHATBOT_NAME, THINKING_LABEL, auto_scroll_script, chat_bubble_css, client_rate_limit_key, get_visible_suggestions, greeting_for_hour, select_prompt, should_show_suggestions, startup_failure_message, submit_turn
 from src.diagnostics import log_debug_turn
 from src.leads import prune_expired_leads
 from src.presentation import format_answer
 from src.rag import HybridKnowledgeBase
 from src.settings import load_streamlit_secrets
+
+logger = logging.getLogger(__name__)
 
 
 load_dotenv()
@@ -78,8 +81,9 @@ def services():
 
 try:
     _, assistant = services()
-except Exception as exc:
-    st.error(f"Knowledge base could not start: {exc}. Install requirements and run `python -m src.ingest --rebuild`.")
+except Exception:
+    logger.exception("Knowledge base startup failed")
+    st.error(startup_failure_message())
     st.stop()
 
 if not os.getenv("LEADS_ENCRYPTION_KEY"):
@@ -128,8 +132,8 @@ with st.container(border=True, key="chat_panel"):
 
     typed_prompt = st.chat_input("Ask in English or Hindi, or tell us about your project…")
     prompt = select_prompt(typed_prompt, clicked)
-    if prompt and len(prompt) > 4000:
-        st.error("Your message is too long. Please keep it under 4,000 characters.")
+    if prompt and len(prompt) > 12000:
+        st.error("Your message is too long. Please keep it under 12,000 characters.")
     elif prompt:
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -137,7 +141,11 @@ with st.container(border=True, key="chat_panel"):
             with st.chat_message("assistant"):
                 with st.spinner(THINKING_LABEL):
                     new_history, new_lead, answer = submit_turn(
-                        assistant, prompt, st.session_state.history, st.session_state.lead, st.session_state.session_id
+                        assistant, prompt, st.session_state.history, st.session_state.lead,
+                        client_rate_limit_key(
+                            getattr(getattr(st, "context", None), "ip_address", None),
+                            st.session_state.session_id,
+                        ),
                     )
             st.session_state.history = new_history
             st.session_state.lead = new_lead

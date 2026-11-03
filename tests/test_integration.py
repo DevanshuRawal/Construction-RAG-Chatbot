@@ -61,6 +61,74 @@ def test_same_filename_in_nested_folders_keeps_distinct_sources(tmp_path):
     assert {item["source"] for item in metadata} == {"east/policy.md", "west/policy.md"}
 
 
+def test_document_answer_uses_grounded_gemini_when_cohere_is_not_configured(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("COHERE_API_KEY", raising=False)
+    data = tmp_path / "data"
+    data.mkdir()
+    source_text = "A 2BHK interior project includes modular kitchen planning and wardrobe design."
+    (data / "interior_services.md").write_text(source_text, encoding="utf-8")
+    kb = HybridKnowledgeBase(str(data), str(tmp_path / "chroma"), encoder=FakeEncoder())
+    kb.ingest()
+
+    class Gemini:
+        def __init__(self):
+            self.models = self
+            self.calls = []
+
+        def generate_content(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(text="It includes kitchen planning and wardrobe design [interior_services.md].")
+
+    gemini = Gemini()
+    bot = ConstructionAssistant(kb, general_client=gemini)
+
+    answer, _ = bot.respond("What is 2BHK?", [], {})
+
+    assert "[interior_services.md]" in answer
+    assert len(gemini.calls) == 1
+    assert source_text in gemini.calls[0]["contents"]
+
+
+def test_document_answer_uses_huggingface_when_cohere_and_gemini_fail(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("COHERE_API_KEY", raising=False)
+    data = tmp_path / "data"
+    data.mkdir()
+    source_text = "A 2BHK interior project includes modular kitchen planning and wardrobe design."
+    (data / "interior_services.md").write_text(source_text, encoding="utf-8")
+    kb = HybridKnowledgeBase(str(data), str(tmp_path / "chroma"), encoder=FakeEncoder())
+    kb.ingest()
+
+    class FailingGemini:
+        def __init__(self):
+            self.models = self
+
+        def generate_content(self, **kwargs):
+            raise RuntimeError("Gemini temporarily unavailable")
+
+    class HuggingFace:
+        def __init__(self):
+            self.calls = []
+
+        def chat_completion(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content="It includes kitchen planning and wardrobe design [interior_services.md]."
+            ))])
+
+    hf = HuggingFace()
+    bot = ConstructionAssistant(kb, general_client=FailingGemini(), hf_client=hf)
+
+    answer, _ = bot.respond("What is 2BHK?", [], {})
+
+    assert "[interior_services.md]" in answer
+    assert len(hf.calls) == 1
+    assert source_text in str(hf.calls[0]["messages"])
+
+
 def test_buying_intent_captures_all_fields_only_after_consent(tmp_path, monkeypatch):
     monkeypatch.delenv("COHERE_API_KEY", raising=False)
     from cryptography.fernet import Fernet

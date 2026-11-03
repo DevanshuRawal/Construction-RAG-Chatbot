@@ -3,6 +3,7 @@ from src.chat_ui import (
     THINKING_LABEL,
     auto_scroll_script,
     chat_bubble_css,
+    client_rate_limit_key,
     get_visible_suggestions,
     greeting_for_hour,
     remaining_suggestions,
@@ -95,6 +96,20 @@ def test_selected_reply_language_is_passed_to_assistant():
     submit_turn(assistant, "What is the warranty?", [], {}, "session-2", language="hindi")
 
     assert assistant.received[0][4] == "hindi"
+
+
+def test_rate_limit_identity_is_shared_across_sessions_from_same_client_ip():
+    first = client_rate_limit_key("203.0.113.7", "session-a")
+    second = client_rate_limit_key("203.0.113.7", "session-b")
+    other_client = client_rate_limit_key("203.0.113.8", "session-c")
+
+    assert first == second
+    assert first != other_client
+    assert "203.0.113.7" not in first
+
+
+def test_rate_limit_falls_back_to_session_identity_without_client_ip():
+    assert client_rate_limit_key(None, "session-a") != client_rate_limit_key(None, "session-b")
 
 
 def test_only_selected_suggestion_is_removed_from_remaining_questions():

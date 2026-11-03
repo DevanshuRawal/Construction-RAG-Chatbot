@@ -1,6 +1,27 @@
 """Small, testable helpers for dispatching chat input from the Streamlit UI."""
 
+import hashlib
+import ipaddress
+
 CHATBOT_NAME = "BuildMate AI"
+
+
+def client_rate_limit_key(client_ip, session_id):
+    """Share request limits across sessions from the same client without storing its IP."""
+    if client_ip:
+        try:
+            normalized_ip = ipaddress.ip_address(str(client_ip).strip()).compressed
+        except ValueError:
+            normalized_ip = str(client_ip).strip()
+        if normalized_ip:
+            digest = hashlib.sha256(normalized_ip.encode("utf-8")).hexdigest()
+            return f"client:{digest}"
+    return f"session:{session_id}"
+
+
+def startup_failure_message():
+    """Return a safe user-facing startup error without internal exception data."""
+    return "The assistant could not start. Please contact the site administrator."
 THINKING_LABEL = "🤔 Thinking…"
 
 

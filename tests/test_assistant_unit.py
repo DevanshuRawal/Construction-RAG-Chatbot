@@ -119,6 +119,302 @@ def test_unrelated_question_uses_gemini_when_company_documents_have_no_answer():
     assert "general-purpose assistant" in client.calls[0]["config"]["system_instruction"]
 
 
+def test_relevant_company_question_uses_exact_retrieved_evidence_without_llm_rewrite():
+    class RelevantKnowledgeBase:
+        def search(self, query):
+            return [{
+                "source": "interior_services.md",
+                "text": "A 2BHK interior project includes modular kitchen planning and wardrobe design.",
+                "score": 0.9,
+            }]
+
+    client = FakeGeminiClient("A 2BHK project includes kitchen planning and wardrobe design [interior_services.md].")
+    bot = ConstructionAssistant(RelevantKnowledgeBase(), general_client=client)
+
+    answer, _ = bot.respond("What is included in a 2BHK interior project?", [], {})
+
+    assert "A 2BHK interior project includes modular kitchen planning and wardrobe design." in answer
+    assert "[interior_services.md]" in answer
+    assert client.calls == []
+
+
+def test_general_question_falls_back_to_gemini_when_cohere_fails():
+    class RelevantKnowledgeBase:
+        def search(self, query):
+            return [{"source": "interior_services.md", "text": "A 2BHK includes wardrobe design.", "score": 0.9}]
+
+    class FailingCohere:
+        def chat(self, **kwargs):
+            raise RuntimeError("temporary Cohere failure")
+
+    client = FakeGeminiClient("A 2BHK includes wardrobe design [interior_services.md].")
+    bot = ConstructionAssistant(RelevantKnowledgeBase(), client=FailingCohere(), general_client=client)
+
+    answer, _ = bot.respond("What is 2BHK?", [], {})
+
+    assert "[interior_services.md]" in answer
+    assert len(client.calls) == 1
+    assert "A 2BHK includes wardrobe design." in client.calls[0]["contents"]
+
+
+def test_general_question_falls_back_to_cohere_when_gemini_is_unavailable():
+    class FailingGemini:
+        def __init__(self):
+            self.models = self
+
+        def generate_content(self, **kwargs):
+            raise RuntimeError("Gemini temporarily unavailable")
+
+    class Cohere:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(message=SimpleNamespace(content=[SimpleNamespace(text="A 2BHK has two bedrooms.")]))
+
+    cohere = Cohere()
+    bot = ConstructionAssistant(EmptyKnowledgeBase(), client=cohere, general_client=FailingGemini())
+
+    answer, _ = bot.respond("What is 2BHK?", [], {})
+
+    assert answer == "A 2BHK has two bedrooms."
+    assert len(cohere.calls) == 1
+    assert "documents" not in cohere.calls[0]
+
+
+def test_gemini_retries_configured_fallback_model_after_primary_fails(monkeypatch):
+    class RetryingGemini:
+        def __init__(self):
+            self.models = self
+            self.calls = []
+
+        def generate_content(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs["model"] == "gemini-3.8-flash":
+                raise RuntimeError("503 temporarily unavailable")
+            return SimpleNamespace(text="A 2BHK has two bedrooms.")
+
+    client = RetryingGemini()
+    bot = ConstructionAssistant(EmptyKnowledgeBase(), general_client=client)
+
+    answer, _ = bot.respond("What is 2BHK?", [], {})
+
+    assert answer == "A 2BHK has two bedrooms."
+    assert [call["model"] for call in client.calls] == ["gemini-3.8-flash", "gemini-3.6-flash"]
+
+
+def test_cohere_retries_with_fallback_model_after_unprocessable_response():
+    class Unprocessable(Exception):
+        status_code = 422
+
+    class Cohere:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs["model"] == "command-r7b-12-2024":
+                raise Unprocessable("No valid response generated")
+            text = "A 2BHK has two bedrooms. [process.md]"
+            return SimpleNamespace(message=SimpleNamespace(
+                content=[SimpleNamespace(text=text)], citations=[]
+            ))
+
+    class RelevantKnowledgeBase:
+        def search(self, query):
+            return [{"source": "process.md", "text": "A 2BHK is a home with two bedrooms.", "score": 0.9}]
+
+    client = Cohere()
+    bot = ConstructionAssistant(RelevantKnowledgeBase(), client=client)
+
+    answer, _ = bot.respond("What is 2BHK?", [], {})
+
+    assert answer == "A 2BHK has two bedrooms. [process.md]"
+    assert [call["model"] for call in client.calls] == ["command-r7b-12-2024", "command-a-03-2025"]
+
+
+def test_gemini_can_answer_general_question_when_retrieval_returns_irrelevant_docs():
+    class RelevantLookingKnowledgeBase:
+        def search(self, query):
+            return [{"source": "interior_services.md", "text": "Our 2BHK designs include wardrobes.", "score": 0.9}]
+
+    class NoCitationCohere:
+        def chat(self, **kwargs):
+            return SimpleNamespace(message=SimpleNamespace(
+                content=[SimpleNamespace(text="Unverified company answer")], citations=[]
+            ))
+
+    gemini = FakeGeminiClient("2BHK means two bedrooms, hall, and kitchen.")
+    bot = ConstructionAssistant(RelevantLookingKnowledgeBase(), client=NoCitationCohere(), general_client=gemini)
+
+    answer, _ = bot.respond("What is 2BHK?", [], {})
+
+    assert answer == "2BHK means two bedrooms, hall, and kitchen."
+    assert len(gemini.calls) == 1
+
+
+def test_provider_outage_is_reported_as_temporary_when_both_grounded_models_fail():
+    class RelevantKnowledgeBase:
+        def search(self, query):
+            return [{"source": "interior_services.md", "text": "A 2BHK includes wardrobes.", "score": 0.9}]
+
+    class NoCitationCohere:
+        def chat(self, **kwargs):
+            return SimpleNamespace(message=SimpleNamespace(
+                content=[SimpleNamespace(text="Unverified answer")], citations=[]
+            ))
+
+    class FailingGemini:
+        def __init__(self):
+            self.models = self
+
+        def generate_content(self, **kwargs):
+            raise RuntimeError("temporary provider outage")
+
+    bot = ConstructionAssistant(RelevantKnowledgeBase(), client=NoCitationCohere(), general_client=FailingGemini())
+
+    answer, _ = bot.respond("What is 2BHK?", [], {})
+
+    assert "trouble reaching the configured answer services" in answer.lower()
+    assert "couldn't verify" not in answer.lower()
+
+
+def test_huggingface_is_last_general_answer_fallback():
+    class FailingGemini:
+        def __init__(self):
+            self.models = self
+
+        def generate_content(self, **kwargs):
+            raise RuntimeError("Gemini temporarily unavailable")
+
+    class HuggingFace:
+        def __init__(self):
+            self.calls = []
+
+        def chat_completion(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="A 2BHK has two bedrooms.")
+            )])
+
+    hf = HuggingFace()
+    bot = ConstructionAssistant(EmptyKnowledgeBase(), general_client=FailingGemini(), hf_client=hf)
+
+    answer, _ = bot.respond("What is 2BHK?", [], {})
+
+    assert answer == "A 2BHK has two bedrooms."
+    assert len(hf.calls) == 1
+    assert hf.calls[0]["model"] == "Qwen/Qwen3-8B"
+
+
+def test_huggingface_client_is_initialized_from_hf_token_without_network(monkeypatch):
+    import huggingface_hub
+
+    constructed = {}
+
+    class InferenceClient:
+        def __init__(self, **kwargs):
+            constructed.update(kwargs)
+
+    monkeypatch.setenv("HF_TOKEN", "configured-hf-token")
+    monkeypatch.setattr(huggingface_hub, "InferenceClient", InferenceClient)
+
+    bot = ConstructionAssistant(EmptyKnowledgeBase())
+
+    assert bot.hf_client is not None
+    assert constructed["provider"] == "auto"
+    assert constructed["api_key"] == "configured-hf-token"
+    assert constructed["timeout"] == 30
+
+
+def test_company_grounded_answer_does_not_accept_model_fabricated_citations():
+    class KnowledgeBase:
+        def search(self, query):
+            return [{"source": "08_warranty.pdf", "text": "Workmanship warranty is 12 months.", "score": 0.9}]
+
+    class Gemini:
+        def __init__(self):
+            self.models = self
+
+        def generate_content(self, **kwargs):
+            return SimpleNamespace(text="The warranty is five years. [invented.pdf]")
+
+    class HuggingFace:
+        def chat_completion(self, **kwargs):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content="Workmanship is covered for 12 months. [08_warranty.pdf]"
+            ))])
+
+    bot = ConstructionAssistant(KnowledgeBase(), general_client=Gemini(), hf_client=HuggingFace())
+
+    answer, _ = bot.respond("What is your warranty?", [], {})
+
+    assert "Workmanship warranty is 12 months." in answer
+    assert "five years" not in answer
+    assert "invented.pdf" not in answer
+
+
+def test_company_grounded_answer_uses_document_text_without_huggingface_claim():
+    class KnowledgeBase:
+        def search(self, query):
+            return [{"source": "08_warranty.pdf", "text": "Workmanship warranty is 12 months.", "score": 0.9}]
+
+    class HuggingFace:
+        def chat_completion(self, **kwargs):
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                content="The warranty is 12 months."
+            ))])
+
+    bot = ConstructionAssistant(KnowledgeBase(), hf_client=HuggingFace())
+
+    answer, _ = bot.respond("What is your warranty?", [], {})
+
+    assert "Workmanship warranty is 12 months." in answer
+    assert "[08_warranty.pdf]" in answer
+
+
+def test_huggingface_receives_retrieved_excerpts_for_grounded_fallback():
+    class RelevantKnowledgeBase:
+        def search(self, query):
+            return [{"source": "interior_services.md", "text": "A 2BHK includes wardrobe design.", "score": 0.9}]
+
+    class FailingProvider:
+        def chat(self, **kwargs):
+            raise RuntimeError("Cohere temporarily unavailable")
+
+    class FailingGemini:
+        def __init__(self):
+            self.models = self
+
+        def generate_content(self, **kwargs):
+            raise RuntimeError("Gemini temporarily unavailable")
+
+    class HuggingFace:
+        def __init__(self):
+            self.calls = []
+
+        def chat_completion(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="A 2BHK includes wardrobe design [interior_services.md].")
+            )])
+
+    hf = HuggingFace()
+    bot = ConstructionAssistant(
+        RelevantKnowledgeBase(),
+        client=FailingProvider(),
+        general_client=FailingGemini(),
+        hf_client=hf,
+    )
+
+    answer, _ = bot.respond("What is 2BHK?", [], {})
+
+    assert "[interior_services.md]" in answer
+    assert "A 2BHK includes wardrobe design." in str(hf.calls[0]["messages"])
+    assert "only from the supplied company excerpts" in hf.calls[0]["messages"][0]["content"]
+
+
 def test_out_of_scope_question_is_sent_to_gemini_when_configured():
     client = FakeGeminiClient("Chess is a strategy board game.")
     bot = ConstructionAssistant(EmptyKnowledgeBase(), general_client=client)

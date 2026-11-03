@@ -1,4 +1,4 @@
-"""Opt-in, PII-redacted JSONL diagnostics for chat turns and retrieved evidence."""
+"""Opt-in, content-free JSONL diagnostics for chat turns and retrieved evidence."""
 from __future__ import annotations
 
 import hashlib
@@ -7,8 +7,6 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-
-from src.assistant import ConstructionAssistant
 
 logger = logging.getLogger(__name__)
 
@@ -19,17 +17,15 @@ def log_debug_turn(user_message, assistant_message, session_id, lead, retrieved_
         return False
 
     try:
-        redact = lambda value: ConstructionAssistant._redact_for_model(str(value), lead)
         event = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "conversation_id": hashlib.sha256(str(session_id).encode("utf-8")).hexdigest()[:16],
-            "user_message": redact(user_message),
-            "assistant_message": redact(assistant_message),
+            "user_message_chars": len(str(user_message)),
+            "assistant_message_chars": len(str(assistant_message)),
             "retrieved_chunks": [
                 {
                     "source": chunk.get("source", "unknown"),
                     "score": round(float(chunk.get("score", 0.0)), 4),
-                    "snippet": redact(chunk.get("text", ""))[:300],
                 }
                 for chunk in retrieved_chunks
             ],
